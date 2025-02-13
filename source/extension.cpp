@@ -1,8 +1,11 @@
 #include "extension.h"
 #include <CDetour/detours.h>
 #include <compat_wrappers.h>
-#include "resolve_collision.h"
 #include "resolve_collision_tools.h"
+#include "util_shared.h"
+#include "NextBotGroundLocomotion.h"
+#include "NextBotInterface.h"
+#include "NextBotBodyInterface.h"
 
 SDKResolveCollision g_sdkResolveCollision;
 SMEXT_LINK(&g_sdkResolveCollision);
@@ -16,6 +19,47 @@ IStaticPropMgrServer* staticpropmgr = nullptr;
 ISDKHooks* g_pSDKHooks = nullptr;
 CDetour* g_pResolveZombieCollisionDetour = nullptr;
 
+Vector NextBotGroundLocomotion::ResolveZombieCollisions(const Vector& pos)
+{
+	Vector adjustedNewPos = pos;
+	CBaseEntity* me = collisiontools->MyInfectedPointer(m_nextBot);
+	const float hullWidth = GetBot()->GetBodyInterface()->GetHullWidth();
+
+	// only avoid if we're actually trying to move somewhere, and are enraged
+	if (me && !IsUsingLadder() && !IsClimbingOrJumping() && IsOnGround() && collisiontools->CBaseEntity_IsAlive(m_nextBot) && IsAttemptingToMove() /*&& GetBot()->GetBodyInterface()->IsArousal( IBody::INTENSE )*/) {
+		const CUtlVector<CHandle<CBaseEntity>>& neighbors = collisiontools->Infected_GetNeighbors(me);
+		Vector avoid = vec3_origin;
+		float avoidWeight = 0.0f;
+		FOR_EACH_VEC(neighbors, it) {
+			CBaseEntity* them = gamehelpers->ReferenceToEntity(neighbors[it].GetEntryIndex());
+			if (them) {
+				Vector toThem = (collisiontools->CBaseEntity_GetAbsOrigin(them) - collisiontools->CBaseEntity_GetAbsOrigin(me));
+				toThem.z = 0.0f;
+				float range = toThem.NormalizeInPlace();
+				if (range < hullWidth) {
+
+					// these two infected are in contact
+					collisiontools->CBaseEntity_Touch(me, them);
+					
+					// move out of contact
+					float penetration = (hullWidth - range);
+					float weight = 1.0f + (2.0f * penetration / hullWidth);
+					
+					avoid += -weight * toThem;
+					avoidWeight += weight;
+				}
+			}
+		}
+		if (avoidWeight > 0.0f) {
+			Vector collision = avoid / avoidWeight;
+			collision *= GetUpdateInterval() / 0.1f;
+			adjustedNewPos += collision;
+		}
+	}
+
+	return adjustedNewPos;
+}
+
 DETOUR_DECL_MEMBER1(NextBotGroundLocomotion__ResolveZombieCollisions, Vector, const Vector&, pos)
 {
 	NextBotGroundLocomotion* groundLocomotion = (NextBotGroundLocomotion*)this;
@@ -24,16 +68,14 @@ DETOUR_DECL_MEMBER1(NextBotGroundLocomotion__ResolveZombieCollisions, Vector, co
 
 bool SDKResolveCollision::SDK_OnLoad(char* error, size_t maxlen, bool late)
 {
-	if (!gameconfs->LoadGameConfigFile("l4d2_resolve_collision", &gpConfig, error, maxlen))
+	if (!gameconfs->LoadGameConfigFile("l4d2_resolve_collision", &gpConfig, error, maxlen)) {
 		return false;
-
+	}
 	if (!collisiontools->Initialize(gpConfig)) {
 		V_snprintf(error, maxlen, "Failed to initialize ResolveCollision tools");
 		return false;
 	}
-
 	CDetourManager::Init(g_pSM->GetScriptingEngine(), gpConfig);
-
 	g_pResolveZombieCollisionDetour = DETOUR_CREATE_MEMBER(NextBotGroundLocomotion__ResolveZombieCollisions, "NextBotGroundLocomotion::ResolveZombieCollisions");
 	g_pResolveZombieCollisionDetour->EnableDetour();
 	return true;
